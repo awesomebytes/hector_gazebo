@@ -44,6 +44,7 @@ generate_messages(
 generate_dynamic_reconfigure_options(
   cfg/SensorModel.cfg
   cfg/GNSS.cfg
+  cfg/ForceBasedMove.cfg
 )
 
 ###################################

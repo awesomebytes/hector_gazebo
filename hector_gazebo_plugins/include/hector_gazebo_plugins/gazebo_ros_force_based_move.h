@@ -42,6 +42,8 @@
 #include <ros/ros.h>
 #include <tf/transform_broadcaster.h>
 #include <tf/transform_listener.h>
+#include <dynamic_reconfigure/server.h>
+#include <hector_gazebo_plugins/ForceBasedMoveConfig.h>
 
 namespace gazebo {
 
@@ -55,6 +57,8 @@ namespace gazebo {
     protected: 
       virtual void UpdateChild();
       virtual void FiniChild();
+
+      void dynamicReconfigureCallback(hector_gazebo_plugins::ForceBasedMoveConfig &config, uint32_t level);
 
     private:
       void publishOdometry(double step_time);
@@ -108,9 +112,21 @@ namespace gazebo {
       math::Pose last_odom_pose_;
 #endif
       
+      boost::shared_ptr<dynamic_reconfigure::Server<hector_gazebo_plugins::ForceBasedMoveConfig> > dynamic_reconfigure_server_;
       double torque_yaw_velocity_p_gain_;
       double force_x_velocity_p_gain_;
       double force_y_velocity_p_gain_;
+      double torque_yaw_velocity_i_gain_;
+      double force_x_velocity_i_gain_;
+      double force_y_velocity_i_gain_;
+      // To store the integrator from the PI
+      double torque_yaw_i_;
+      double force_x_i_;
+      double force_y_i_;
+      // To clamp the maximum force we can exert
+      double max_torque_yaw_;
+      double max_force_x_;
+      double max_force_y_;
 
   };
 

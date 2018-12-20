@@ -30,7 +30,10 @@ namespace gazebo
 
   GazeboRosForceBasedMove::GazeboRosForceBasedMove() {}
 
-  GazeboRosForceBasedMove::~GazeboRosForceBasedMove() {}
+  GazeboRosForceBasedMove::~GazeboRosForceBasedMove() {
+    dynamic_reconfigure_server_.reset();
+    rosnode_->shutdown();
+  }
 
   // Load the controller
   void GazeboRosForceBasedMove::Load(physics::ModelPtr parent,
@@ -89,10 +92,22 @@ namespace gazebo
       odometry_frame_ = sdf->GetElement("odometryFrame")->Get<std::string>();
     }
     
-    
-    torque_yaw_velocity_p_gain_ = 100.0;
-    force_x_velocity_p_gain_ = 10000.0;
-    force_y_velocity_p_gain_ = 10000.0;
+    // All these are related somehow to the friction
+    // coefficients of the link that we are pushing with the force
+    // as in, mu, mu2, fdir
+    torque_yaw_velocity_p_gain_ = 1.0;
+    force_x_velocity_p_gain_ = 1.0;
+    force_y_velocity_p_gain_ = 1.0;
+    torque_yaw_velocity_i_gain_ = 0.0;
+    force_x_velocity_i_gain_ = 0.0;
+    force_y_velocity_i_gain_ = 0.0;
+    max_torque_yaw_ = 100.0;
+    max_force_x_ = 100.0;
+    max_force_y_ = 100.0;
+
+    torque_yaw_i_ = 0.0;
+    force_x_i_ = 0.0;
+    force_y_i_ = 0.0;
     
     if (sdf->HasElement("yaw_velocity_p_gain"))
       (sdf->GetElement("yaw_velocity_p_gain")->GetValue()->Get(torque_yaw_velocity_p_gain_));
@@ -102,10 +117,34 @@ namespace gazebo
 
     if (sdf->HasElement("y_velocity_p_gain"))
       (sdf->GetElement("y_velocity_p_gain")->GetValue()->Get(force_y_velocity_p_gain_));
+
+    if (sdf->HasElement("yaw_velocity_i_gain"))
+      (sdf->GetElement("yaw_velocity_i_gain")->GetValue()->Get(torque_yaw_velocity_i_gain_));
+
+    if (sdf->HasElement("x_velocity_i_gain"))
+      (sdf->GetElement("x_velocity_i_gain")->GetValue()->Get(force_x_velocity_i_gain_));
+
+    if (sdf->HasElement("y_velocity_i_gain"))
+      (sdf->GetElement("y_velocity_i_gain")->GetValue()->Get(force_y_velocity_i_gain_));
+
+    if (sdf->HasElement("max_torque_yaw"))
+      (sdf->GetElement("max_torque_yaw")->GetValue()->Get(max_torque_yaw_));
+
+    if (sdf->HasElement("max_force_x"))
+      (sdf->GetElement("max_force_x")->GetValue()->Get(max_force_x_));
+
+    if (sdf->HasElement("max_force_y"))
+      (sdf->GetElement("max_force_y")->GetValue()->Get(max_force_y_));
       
-    ROS_INFO_STREAM("ForceBasedMove using gains: yaw: " << torque_yaw_velocity_p_gain_ <<
-                                                 " x: " << force_x_velocity_p_gain_ <<
-                                                 " y: " << force_y_velocity_p_gain_ << "\n");
+    ROS_INFO_STREAM("ForceBasedMove using gains:\np yaw: " << torque_yaw_velocity_p_gain_ <<
+                                                 "\np x: " << force_x_velocity_p_gain_ <<
+                                                 "\np y: " << force_y_velocity_p_gain_ <<
+                                                 "\ni yaw: " << torque_yaw_velocity_i_gain_ <<
+                                                 "\ni x: " << force_x_velocity_i_gain_ <<
+                                                 "\ni y: " << force_y_velocity_i_gain_ <<
+                                                 "\nmax torque yaw: " << max_torque_yaw_ <<
+                                                 "\nmax force x: " << max_force_x_ <<
+                                                 "\nmax force y: " << max_force_y_);
 
     robot_base_frame_ = "base_footprint";
     if (!sdf->HasElement("robotBaseFrame")) 
@@ -194,7 +233,47 @@ namespace gazebo
       event::Events::ConnectWorldUpdateBegin(
           boost::bind(&GazeboRosForceBasedMove::UpdateChild, this));
 
+
+  // setup dynamic_reconfigure server
+  dynamic_reconfigure_server_.reset(new dynamic_reconfigure::Server<hector_gazebo_plugins::ForceBasedMoveConfig>(ros::NodeHandle(*rosnode_, "force_based_move")));
+  dynamic_reconfigure_server_->setCallback(boost::bind(&GazeboRosForceBasedMove::dynamicReconfigureCallback, this, _1, _2));
+
   }
+
+void GazeboRosForceBasedMove::dynamicReconfigureCallback(hector_gazebo_plugins::ForceBasedMoveConfig &config, uint32_t level)
+{
+  ROS_INFO_STREAM("We got a reconf call with level "<< level);
+  // If the call was triggered by dynamic reconfigure manually
+  if (level == 1){
+    torque_yaw_velocity_p_gain_ = config.yaw_velocity_p_gain;
+    torque_yaw_velocity_i_gain_ = config.yaw_velocity_i_gain;
+
+    force_x_velocity_p_gain_ = config.x_velocity_p_gain;
+    force_x_velocity_i_gain_ = config.x_velocity_i_gain;
+
+    force_y_velocity_p_gain_ = config.y_velocity_p_gain;
+    force_y_velocity_i_gain_ = config.y_velocity_i_gain;
+
+    max_torque_yaw_ = config.max_torque_yaw;
+    max_force_x_ = config.max_force_x;
+    max_force_y_ = config.max_force_y;
+  }
+  // Force using the config set in the SDF for the dynamic reconfigure first
+  else{
+    config.yaw_velocity_p_gain = torque_yaw_velocity_p_gain_;
+    config.yaw_velocity_i_gain = torque_yaw_velocity_i_gain_;
+
+    config.x_velocity_p_gain = force_x_velocity_p_gain_;
+    config.x_velocity_i_gain = force_x_velocity_i_gain_;
+
+    config.y_velocity_p_gain = force_y_velocity_p_gain_;
+    config.y_velocity_i_gain = force_y_velocity_i_gain_;
+
+    config.max_torque_yaw = max_torque_yaw_;
+    config.max_force_x = max_force_x_;
+    config.max_force_y = max_force_y_;
+  }
+}
 
   // Update the controller
   void GazeboRosForceBasedMove::UpdateChild()
@@ -205,32 +284,94 @@ namespace gazebo
 
     ignition::math::Vector3d angular_vel = parent_->WorldAngularVel();
 
-    double error = angular_vel.Z() - rot_;
+    double error_yaw = rot_ - angular_vel.Z();
+    double p_value_yaw = error_yaw * torque_yaw_velocity_p_gain_;
+    double i_value_yaw = (torque_yaw_i_ + error_yaw) * torque_yaw_velocity_i_gain_;
+    torque_yaw_i_ = i_value_yaw;
+    double value_yaw = p_value_yaw + i_value_yaw;
+    if (value_yaw > max_torque_yaw_)
+      value_yaw = max_torque_yaw_;
+    if (value_yaw < -max_torque_yaw_)
+      value_yaw = -max_torque_yaw_;
 
-    link_->AddTorque(ignition::math::Vector3d(0.0, 0.0, -error * torque_yaw_velocity_p_gain_));
+    link_->AddTorque(ignition::math::Vector3d(0.0, 0.0, value_yaw));
 
-    float yaw = pose.Rot().Yaw();
 
     ignition::math::Vector3d linear_vel = parent_->RelativeLinearVel();
 
-    link_->AddRelativeForce(ignition::math::Vector3d((x_ - linear_vel.X())* force_x_velocity_p_gain_,
-                                                     (y_ - linear_vel.Y())* force_y_velocity_p_gain_,
+    double error_x = x_ - linear_vel.X();
+    double p_value_x = error * force_x_velocity_p_gain_;
+    double i_value_x = (force_x_i_ + error_x) * force_x_velocity_i_gain_;
+    force_x_i_ = i_value_x;
+    double value_x = p_value_x + i_value_x;
+    if (value_x > max_force_x_)
+      value_x = max_force_x_;
+    if (value_x < -max_force_x_)
+      value_x = -max_force_x_;
+
+    double error_y = y_ - linear_vel.Y();
+    double p_value_y = error_y * force_y_velocity_p_gain_;
+    double i_value_y = (force_y_i_ + error_y) * force_y_velocity_i_gain_;
+    force_y_i_ = i_value_y;
+    double value_y = p_value_y + i_value_y;
+    if (value_y > max_force_y_)
+      value_y = max_force_y_;
+    if (value_y < -max_force_y_)
+      value_y = -max_force_y_;
+
+    link_->AddRelativeForce(ignition::math::Vector3d(value_x,
+                                                     value_y,
                                                      0.0));
 #else
     math::Pose pose = parent_->GetWorldPose();
 
     math::Vector3 angular_vel = parent_->GetWorldAngularVel();
 
-    double error = angular_vel.z - rot_;
+    double error_yaw = rot_ - angular_vel.z;
+    double p_value_yaw = error_yaw * torque_yaw_velocity_p_gain_;
+    double i_value_yaw = (torque_yaw_i_ + error_yaw) * torque_yaw_velocity_i_gain_;
+    torque_yaw_i_ = i_value_yaw;
+    double value_yaw = p_value_yaw + i_value_yaw;
+    if (value_yaw > max_torque_yaw_)
+      value_yaw = max_torque_yaw_;
+    if (value_yaw < -max_torque_yaw_)
+      value_yaw = -max_torque_yaw_;
 
-    link_->AddTorque(math::Vector3(0.0, 0.0, -error * torque_yaw_velocity_p_gain_));
-
-    float yaw = pose.rot.GetYaw();
+    link_->AddTorque(math::Vector3(0.0, 0.0, value_yaw));
 
     math::Vector3 linear_vel = parent_->GetRelativeLinearVel();
+    
+    double error_x = x_ - linear_vel.x;
+    double p_value_x = error_x * force_x_velocity_p_gain_;
+    double i_value_x = (force_x_i_ + error_x) * force_x_velocity_i_gain_;
+    force_x_i_ = i_value_x;
+    // if (force_x_i_ > 500)
+    //   force_x_i_ = 500;
+    // if (force_x_i_ < -500)
+    //   force_x_i_ = -500;
+    double value_x = p_value_x + i_value_x;
+    if (value_x > max_force_x_)
+      value_x = max_force_x_;
+    if (value_x < -max_force_x_)
+      value_x = -max_force_x_;
+    ROS_WARN_STREAM("X)\nerror:      " << error_x << 
+      "\np_value:    " << p_value_x << 
+      "\ni_value:    " << i_value_x <<
+      "\nforce_x_i_: " << force_x_i_ <<
+      "\nfinal val:  " << value_x);
 
-    link_->AddRelativeForce(math::Vector3((x_ - linear_vel.x)* force_x_velocity_p_gain_,
-                                          (y_ - linear_vel.y)* force_y_velocity_p_gain_,
+    double error_y = y_ - linear_vel.y;
+    double p_value_y = error_y * force_y_velocity_p_gain_;
+    double i_value_y = (force_y_i_ + error_y) * force_y_velocity_i_gain_;
+    force_y_i_ = i_value_y;
+    double value_y = p_value_y + i_value_y;
+    if (value_y > max_force_y_)
+      value_y = max_force_y_;
+    if (value_y < -max_force_y_)
+      value_y = -max_force_y_;
+
+    link_->AddRelativeForce(math::Vector3(value_x,
+                                          value_y,
                                           0.0));
 #endif
     //parent_->PlaceOnNearestEntityBelow();
