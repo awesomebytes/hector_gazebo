@@ -31,7 +31,6 @@ namespace gazebo
   GazeboRosForceBasedMove::GazeboRosForceBasedMove() {}
 
   GazeboRosForceBasedMove::~GazeboRosForceBasedMove() {
-    dynamic_reconfigure_server_.reset();
     rosnode_->shutdown();
   }
 
@@ -95,19 +94,18 @@ namespace gazebo
     // All these are related somehow to the friction
     // coefficients of the link that we are pushing with the force
     // as in, mu, mu2, fdir
-    torque_yaw_velocity_p_gain_ = 1.0;
-    force_x_velocity_p_gain_ = 1.0;
-    force_y_velocity_p_gain_ = 1.0;
+    torque_yaw_velocity_p_gain_ = 0.0;
+    force_x_velocity_p_gain_ = 0.0;
+    force_y_velocity_p_gain_ = 0.0;
     torque_yaw_velocity_i_gain_ = 0.0;
     force_x_velocity_i_gain_ = 0.0;
     force_y_velocity_i_gain_ = 0.0;
-    max_torque_yaw_ = 100.0;
-    max_force_x_ = 100.0;
-    max_force_y_ = 100.0;
-
-    torque_yaw_i_ = 0.0;
-    force_x_i_ = 0.0;
-    force_y_i_ = 0.0;
+    torque_yaw_velocity_d_gain_ = 0.0;
+    force_x_velocity_d_gain_ = 0.0;
+    force_y_velocity_d_gain_ = 0.0;
+    torque_yaw_velocity_i_clamp_ = 0.0;
+    force_x_velocity_i_clamp_ = 0.0;
+    force_y_velocity_i_clamp_ = 0.0;
     
     if (sdf->HasElement("yaw_velocity_p_gain"))
       (sdf->GetElement("yaw_velocity_p_gain")->GetValue()->Get(torque_yaw_velocity_p_gain_));
@@ -127,14 +125,24 @@ namespace gazebo
     if (sdf->HasElement("y_velocity_i_gain"))
       (sdf->GetElement("y_velocity_i_gain")->GetValue()->Get(force_y_velocity_i_gain_));
 
-    if (sdf->HasElement("max_torque_yaw"))
-      (sdf->GetElement("max_torque_yaw")->GetValue()->Get(max_torque_yaw_));
+    if (sdf->HasElement("yaw_velocity_d_gain"))
+      (sdf->GetElement("yaw_velocity_d_gain")->GetValue()->Get(torque_yaw_velocity_d_gain_));
 
-    if (sdf->HasElement("max_force_x"))
-      (sdf->GetElement("max_force_x")->GetValue()->Get(max_force_x_));
+    if (sdf->HasElement("x_velocity_d_gain"))
+      (sdf->GetElement("x_velocity_d_gain")->GetValue()->Get(force_x_velocity_d_gain_));
 
-    if (sdf->HasElement("max_force_y"))
-      (sdf->GetElement("max_force_y")->GetValue()->Get(max_force_y_));
+    if (sdf->HasElement("y_velocity_d_gain"))
+      (sdf->GetElement("y_velocity_d_gain")->GetValue()->Get(force_y_velocity_d_gain_));
+
+    if (sdf->HasElement("yaw_velocity_i_clamp"))
+      (sdf->GetElement("yaw_velocity_i_clamp")->GetValue()->Get(torque_yaw_velocity_i_clamp_));
+
+    if (sdf->HasElement("x_velocity_i_clamp"))
+      (sdf->GetElement("x_velocity_i_clamp")->GetValue()->Get(force_x_velocity_i_clamp_));
+
+    if (sdf->HasElement("y_velocity_i_clamp"))
+      (sdf->GetElement("y_velocity_i_clamp")->GetValue()->Get(force_y_velocity_i_clamp_));
+
       
     ROS_INFO_STREAM("ForceBasedMove using gains:\np yaw: " << torque_yaw_velocity_p_gain_ <<
                                                  "\np x: " << force_x_velocity_p_gain_ <<
@@ -142,9 +150,12 @@ namespace gazebo
                                                  "\ni yaw: " << torque_yaw_velocity_i_gain_ <<
                                                  "\ni x: " << force_x_velocity_i_gain_ <<
                                                  "\ni y: " << force_y_velocity_i_gain_ <<
-                                                 "\nmax torque yaw: " << max_torque_yaw_ <<
-                                                 "\nmax force x: " << max_force_x_ <<
-                                                 "\nmax force y: " << max_force_y_);
+                                                 "\nd yaw: " << torque_yaw_velocity_d_gain_ <<
+                                                 "\nd x: " << force_x_velocity_d_gain_ <<
+                                                 "\nd y: " << force_y_velocity_d_gain_ <<
+                                                 "\ni_clamp yaw: " << torque_yaw_velocity_i_clamp_ <<
+                                                 "\ni_clamp x: " << force_x_velocity_i_clamp_ <<
+                                                 "\ni_clamp y: " << force_y_velocity_i_clamp_);
 
     robot_base_frame_ = "base_footprint";
     if (!sdf->HasElement("robotBaseFrame")) 
@@ -189,9 +200,10 @@ namespace gazebo
     last_odom_publish_time_ = parent_->GetWorld()->GetSimTime();
     last_odom_pose_ = parent_->GetWorldPose();
 #endif
-    x_ = 0;
-    y_ = 0;
-    rot_ = 0;
+
+    x_ = 0.0;
+    y_ = 0.0;
+    yaw_ = 0.0;
     alive_ = true;
 
     odom_transform_.setIdentity();
@@ -233,91 +245,51 @@ namespace gazebo
       event::Events::ConnectWorldUpdateBegin(
           boost::bind(&GazeboRosForceBasedMove::UpdateChild, this));
 
+    // Apparently the dynamic reconfigure server only instances if there is at least
+    // a 'p' param for it
+    rosnode_->setParam("force_based_move/yaw_pid/p", torque_yaw_velocity_p_gain_);
+    rosnode_->setParam("force_based_move/yaw_pid/i", torque_yaw_velocity_i_gain_);
+    rosnode_->setParam("force_based_move/yaw_pid/d", torque_yaw_velocity_d_gain_);
+    rosnode_->setParam("force_based_move/yaw_pid/i_clamp_min", -torque_yaw_velocity_i_clamp_);
+    rosnode_->setParam("force_based_move/yaw_pid/i_clamp_max", torque_yaw_velocity_i_clamp_);
+    pid_yaw_velocity_.init(ros::NodeHandle(*rosnode_, "force_based_move/yaw_pid"), false);
 
-  // setup dynamic_reconfigure server
-  dynamic_reconfigure_server_.reset(new dynamic_reconfigure::Server<hector_gazebo_plugins::ForceBasedMoveConfig>(ros::NodeHandle(*rosnode_, "force_based_move")));
-  dynamic_reconfigure_server_->setCallback(boost::bind(&GazeboRosForceBasedMove::dynamicReconfigureCallback, this, _1, _2));
+    rosnode_->setParam("force_based_move/x_pid/p", force_x_velocity_p_gain_);
+    rosnode_->setParam("force_based_move/x_pid/i", force_x_velocity_i_gain_);
+    rosnode_->setParam("force_based_move/x_pid/d", force_x_velocity_d_gain_);
+    rosnode_->setParam("force_based_move/x_pid/i_clamp_min", -force_x_velocity_i_clamp_);
+    rosnode_->setParam("force_based_move/x_pid/i_clamp_max", force_x_velocity_i_clamp_);
+    pid_x_velocity_.init(ros::NodeHandle(*rosnode_, "force_based_move/x_pid"), false);
 
+    rosnode_->setParam("force_based_move/y_pid/p", force_y_velocity_p_gain_);
+    rosnode_->setParam("force_based_move/y_pid/i", force_y_velocity_i_gain_);
+    rosnode_->setParam("force_based_move/y_pid/d", force_y_velocity_d_gain_);
+    rosnode_->setParam("force_based_move/y_pid/i_clamp_min", -force_y_velocity_i_clamp_);
+    rosnode_->setParam("force_based_move/y_pid/i_clamp_max", force_y_velocity_i_clamp_);
+    pid_y_velocity_.init(ros::NodeHandle(*rosnode_, "force_based_move/y_pid"), false);
   }
 
-void GazeboRosForceBasedMove::dynamicReconfigureCallback(hector_gazebo_plugins::ForceBasedMoveConfig &config, uint32_t level)
-{
-  ROS_INFO_STREAM("We got a reconf call with level "<< level);
-  // If the call was triggered by dynamic reconfigure manually
-  if (level == 1){
-    torque_yaw_velocity_p_gain_ = config.yaw_velocity_p_gain;
-    torque_yaw_velocity_i_gain_ = config.yaw_velocity_i_gain;
-
-    force_x_velocity_p_gain_ = config.x_velocity_p_gain;
-    force_x_velocity_i_gain_ = config.x_velocity_i_gain;
-
-    force_y_velocity_p_gain_ = config.y_velocity_p_gain;
-    force_y_velocity_i_gain_ = config.y_velocity_i_gain;
-
-    max_torque_yaw_ = config.max_torque_yaw;
-    max_force_x_ = config.max_force_x;
-    max_force_y_ = config.max_force_y;
-  }
-  // Force using the config set in the SDF for the dynamic reconfigure first
-  else{
-    config.yaw_velocity_p_gain = torque_yaw_velocity_p_gain_;
-    config.yaw_velocity_i_gain = torque_yaw_velocity_i_gain_;
-
-    config.x_velocity_p_gain = force_x_velocity_p_gain_;
-    config.x_velocity_i_gain = force_x_velocity_i_gain_;
-
-    config.y_velocity_p_gain = force_y_velocity_p_gain_;
-    config.y_velocity_i_gain = force_y_velocity_i_gain_;
-
-    config.max_torque_yaw = max_torque_yaw_;
-    config.max_force_x = max_force_x_;
-    config.max_force_y = max_force_y_;
-  }
-}
 
   // Update the controller
   void GazeboRosForceBasedMove::UpdateChild()
   {
     boost::mutex::scoped_lock scoped_lock(lock);
+    ros::Time tnow = ros::Time::now();
+    ros::Duration dt = tnow - last_pid_update_time_;
 #if (GAZEBO_MAJOR_VERSION >= 8)
     ignition::math::Pose3d pose = parent_->WorldPose();
 
     ignition::math::Vector3d angular_vel = parent_->WorldAngularVel();
 
-    double error_yaw = rot_ - angular_vel.Z();
-    double p_value_yaw = error_yaw * torque_yaw_velocity_p_gain_;
-    double i_value_yaw = (torque_yaw_i_ + error_yaw) * torque_yaw_velocity_i_gain_;
-    torque_yaw_i_ = i_value_yaw;
-    double value_yaw = p_value_yaw + i_value_yaw;
-    if (value_yaw > max_torque_yaw_)
-      value_yaw = max_torque_yaw_;
-    if (value_yaw < -max_torque_yaw_)
-      value_yaw = -max_torque_yaw_;
+    double value_yaw = pid_yaw_velocity_.computeCommand(pid_yaw_velocity_.getCurrentCmd() - angular_vel.Z(), dt);
 
     link_->AddTorque(ignition::math::Vector3d(0.0, 0.0, value_yaw));
 
 
     ignition::math::Vector3d linear_vel = parent_->RelativeLinearVel();
 
-    double error_x = x_ - linear_vel.X();
-    double p_value_x = error * force_x_velocity_p_gain_;
-    double i_value_x = (force_x_i_ + error_x) * force_x_velocity_i_gain_;
-    force_x_i_ = i_value_x;
-    double value_x = p_value_x + i_value_x;
-    if (value_x > max_force_x_)
-      value_x = max_force_x_;
-    if (value_x < -max_force_x_)
-      value_x = -max_force_x_;
-
-    double error_y = y_ - linear_vel.Y();
-    double p_value_y = error_y * force_y_velocity_p_gain_;
-    double i_value_y = (force_y_i_ + error_y) * force_y_velocity_i_gain_;
-    force_y_i_ = i_value_y;
-    double value_y = p_value_y + i_value_y;
-    if (value_y > max_force_y_)
-      value_y = max_force_y_;
-    if (value_y < -max_force_y_)
-      value_y = -max_force_y_;
+    double value_x = pid_x_velocity_.computeCommand(pid_x_velocity_.getCurrentCmd() - linear_vel.X(), dt);
+    double value_y = pid_y_velocity_.computeCommand(pid_y_velocity_.getCurrentCmd() - linear_vel.Y(), dt);
 
     link_->AddRelativeForce(ignition::math::Vector3d(value_x,
                                                      value_y,
@@ -326,60 +298,19 @@ void GazeboRosForceBasedMove::dynamicReconfigureCallback(hector_gazebo_plugins::
     math::Pose pose = parent_->GetWorldPose();
 
     math::Vector3 angular_vel = parent_->GetWorldAngularVel();
+    math::Vector3 linear_vel = parent_->GetRelativeLinearVel();
 
-    double error_yaw = rot_ - angular_vel.z;
-    double p_value_yaw = error_yaw * torque_yaw_velocity_p_gain_;
-    double i_value_yaw = (torque_yaw_i_ + error_yaw) * torque_yaw_velocity_i_gain_;
-    torque_yaw_i_ = i_value_yaw;
-    double value_yaw = p_value_yaw + i_value_yaw;
-    if (value_yaw > max_torque_yaw_)
-      value_yaw = max_torque_yaw_;
-    if (value_yaw < -max_torque_yaw_)
-      value_yaw = -max_torque_yaw_;
-
+    double  value_yaw = pid_yaw_velocity_.computeCommand(yaw_ - angular_vel.z, dt);
     link_->AddTorque(math::Vector3(0.0, 0.0, value_yaw));
 
-    math::Vector3 linear_vel = parent_->GetRelativeLinearVel();
-    
-    double error_x = x_ - linear_vel.x;
-    double p_value_x = error_x * force_x_velocity_p_gain_;
-    double i_value_x = (force_x_i_ + error_x) * force_x_velocity_i_gain_;
-    force_x_i_ = i_value_x;
-    // if (force_x_i_ > 500)
-    //   force_x_i_ = 500;
-    // if (force_x_i_ < -500)
-    //   force_x_i_ = -500;
-    double value_x = p_value_x + i_value_x;
-    if (value_x > max_force_x_)
-      value_x = max_force_x_;
-    if (value_x < -max_force_x_)
-      value_x = -max_force_x_;
-    ROS_WARN_STREAM("X)\nerror:      " << error_x << 
-      "\np_value:    " << p_value_x << 
-      "\ni_value:    " << i_value_x <<
-      "\nforce_x_i_: " << force_x_i_ <<
-      "\nfinal val:  " << value_x);
-
-    double error_y = y_ - linear_vel.y;
-    double p_value_y = error_y * force_y_velocity_p_gain_;
-    double i_value_y = (force_y_i_ + error_y) * force_y_velocity_i_gain_;
-    force_y_i_ = i_value_y;
-    double value_y = p_value_y + i_value_y;
-    if (value_y > max_force_y_)
-      value_y = max_force_y_;
-    if (value_y < -max_force_y_)
-      value_y = -max_force_y_;
+    double value_x = pid_x_velocity_.computeCommand(x_ - linear_vel.x, dt);
+    double value_y = pid_y_velocity_.computeCommand(y_ - linear_vel.y, dt);
 
     link_->AddRelativeForce(math::Vector3(value_x,
                                           value_y,
-                                          0.0));
+                                            0.0));
 #endif
-    //parent_->PlaceOnNearestEntityBelow();
-    //parent_->SetLinearVel(math::Vector3(
-    //      x_ * cosf(yaw) - y_ * sinf(yaw),
-    //      y_ * cosf(yaw) + x_ * sinf(yaw),
-    //      0));
-    //parent_->SetAngularVel(math::Vector3(0, 0, rot_));
+    last_pid_update_time_ = tnow;
 
     if (odometry_rate_ > 0.0) {
 #if (GAZEBO_MAJOR_VERSION >= 8)
@@ -411,7 +342,12 @@ void GazeboRosForceBasedMove::dynamicReconfigureCallback(hector_gazebo_plugins::
     boost::mutex::scoped_lock scoped_lock(lock);
     x_ = cmd_msg->linear.x;
     y_ = cmd_msg->linear.y;
-    rot_ = cmd_msg->angular.z;
+    yaw_ = cmd_msg->angular.z;
+    ROS_DEBUG_STREAM("Updating command:\n" << 
+      "x: " << cmd_msg->linear.x <<
+      "\ny: " << cmd_msg->linear.y <<
+      "\nyaw: " << cmd_msg->angular.z);
+ 
   }
 
   void GazeboRosForceBasedMove::QueueThread()
@@ -435,20 +371,22 @@ void GazeboRosForceBasedMove::dynamicReconfigureCallback(hector_gazebo_plugins::
     ignition::math::Vector3d angular_vel = parent_->RelativeAngularVel();
     ignition::math::Vector3d linear_vel = parent_->RelativeLinearVel();
 
-    odom_transform_= odom_transform_ * this->getTransformForMotion(linear_vel.X(), angular_vel.Z(), step_time);
+    odom_transform_= odom_transform_ * this->getTransformForMotion(linear_vel.X(), linear_vel.Y(), angular_vel.Z(), step_time);
 
     tf::poseTFToMsg(odom_transform_, odom_.pose.pose);
     odom_.twist.twist.angular.z = angular_vel.Z();
     odom_.twist.twist.linear.x  = linear_vel.X();
+    odom_.twist.twist.linear.y = linear_vel.Y();
 #else
     math::Vector3 angular_vel = parent_->GetRelativeAngularVel();
     math::Vector3 linear_vel = parent_->GetRelativeLinearVel();
 
-    odom_transform_= odom_transform_ * this->getTransformForMotion(linear_vel.x, angular_vel.z, step_time);
+    odom_transform_= odom_transform_ * this->getTransformForMotion(linear_vel.x, linear_vel.y, angular_vel.z, step_time);
 
     tf::poseTFToMsg(odom_transform_, odom_.pose.pose);
     odom_.twist.twist.angular.z = angular_vel.z;
     odom_.twist.twist.linear.x  = linear_vel.x;
+    odom_.twist.twist.linear.y = linear_vel.y;
 #endif
 
     odom_.header.stamp = current_time;
@@ -499,7 +437,7 @@ void GazeboRosForceBasedMove::dynamicReconfigureCallback(hector_gazebo_plugins::
   }
 
 
-  tf::Transform GazeboRosForceBasedMove::getTransformForMotion(double linear_vel_x, double angular_vel, double timeSeconds) const
+  tf::Transform GazeboRosForceBasedMove::getTransformForMotion(double linear_vel_x, double linear_vel_y, double angular_vel, double timeSeconds) const
   {
     tf::Transform tmp;
     tmp.setIdentity();
@@ -507,10 +445,10 @@ void GazeboRosForceBasedMove::dynamicReconfigureCallback(hector_gazebo_plugins::
 
     if (std::abs(angular_vel) < 0.0001) {
       //Drive straight
-      tmp.setOrigin(tf::Vector3(static_cast<double>(linear_vel_x*timeSeconds), 0.0, 0.0));
+      tmp.setOrigin(tf::Vector3(static_cast<double>(linear_vel_x*timeSeconds), static_cast<double>(linear_vel_y*timeSeconds), 0.0));
     } else {
       //Follow circular arc
-      double distChange = linear_vel_x * timeSeconds;
+      double distChange = linear_vel_x * timeSeconds + linear_vel_y * timeSeconds;
       double angleChange = angular_vel * timeSeconds;
 
       double arcRadius = distChange / angleChange;
